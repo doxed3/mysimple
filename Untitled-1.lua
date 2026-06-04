@@ -1,5 +1,5 @@
 -- ================================================================
---  CarScript  |  Fix It Up  |  v6
+--  CarScript  |  Fix It Up  |  v7
 -- ================================================================
 
 -- ── KILL OLD INSTANCE ───────────────────────────────────────────
@@ -30,6 +30,7 @@ local Players            = game:GetService("Players")
 local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 local CoreGui            = game:GetService("CoreGui")
 local MarketplaceService = game:GetService("MarketplaceService")
+local TweenService       = game:GetService("TweenService")
 
 local Camera        = workspace.CurrentCamera
 local LocalPlayer   = Players.LocalPlayer
@@ -37,42 +38,48 @@ local VehicleFolder = workspace:WaitForChild("Vehicles")
 local PlayerData    = LocalPlayer:WaitForChild("PlayerData")
 local Garage        = PlayerData:WaitForChild("Garage")
 
-local RemoteLoad  = ReplicatedStorage:WaitForChild("Events"):WaitForChild("Vehicles"):WaitForChild("RemoteLoad")
-local PartsEvent  = ReplicatedStorage:WaitForChild("Events"):WaitForChild("PartsEvent")
+local RemoteLoad = ReplicatedStorage:WaitForChild("Events"):WaitForChild("Vehicles"):WaitForChild("RemoteLoad")
+local PartsEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("PartsEvent")
+
+-- Car name lookup via CarNames module
+local CarNames = nil
+pcall(function() CarNames = require(ReplicatedStorage.Modules.CarNames) end)
 
 local gameName = "Fix It Up"
 pcall(function() gameName = MarketplaceService:GetProductInfo(game.PlaceId).Name end)
 
 -- ── STATE ────────────────────────────────────────────────────────
 local State = {
-    -- ESP toggles (all false by default)
-    espEnabled   = false,
-    showBuyable  = false,
-    showOwned    = false,
-    showChances  = false,
-    showName     = false,
-    showTier     = false,
-    showPrice    = false,
-    showProfit   = false,
-    showDist     = false,
-    espDistance  = 2000,
+    -- ESP
+    espEnabled      = false,
+    showBuyable     = false,
+    showOwned       = false,
+    showChances     = false,
+    showName        = false,
+    showTier        = false,
+    showPrice       = false,
+    showProfit      = false,
+    showDist        = false,
+    espDistance     = 2000,
     -- Highlights
-    hlEnabled    = false,
-    useFillColor    = false,   -- false = use tier color, true = use custom
+    hlEnabled       = false,
+    useFillColor    = false,
     useOutlineColor = false,
-    fillColor    = Color3.fromRGB(0, 100, 255),
-    outlineColor = Color3.fromRGB(0, 170, 255),
-    useTextColor = false,
-    textColor    = Color3.fromRGB(255, 255, 255),
-    -- Tiers (all false by default)
+    useTextColor    = false,
+    fillColor       = Color3.fromRGB(0, 100, 255),
+    outlineColor    = Color3.fromRGB(0, 170, 255),
+    textColor       = Color3.fromRGB(255, 255, 255),
+    -- Tiers
     showS = false, showA = false, showB = false, showC = false, showD = false,
-    -- Respawn notif
-    respawnNotif  = false,
-    notifLimit    = 0,   -- 0 = notify all, 1-10 = max N per respawn
+    -- Respawn billboard notif
+    respawnBillboard = false,
+    respawnInterval  = 30,  -- seconds
+    -- Respawn wave notif
+    respawnWaveNotif = false,
     -- Farm
     farmEnabled  = false,
     farmMode     = "fix",
-    farmTick     = 1.0,
+    farmTick     = 3.0,
     -- UI
     watermark    = false,
 }
@@ -82,13 +89,13 @@ local State = {
 -- ================================================================
 local CFG = {
     TIERS = {
-        { min = 0,       max = 49999,     label = "D", color = Color3.fromRGB(180, 180, 180) },
-        { min = 50000,   max = 149999,    label = "C", color = Color3.fromRGB(80,  210, 80)  },
-        { min = 150000,  max = 499999,    label = "B", color = Color3.fromRGB(80,  130, 235) },
-        { min = 500000,  max = 1499999,   label = "A", color = Color3.fromRGB(210, 80,  235) },
-        { min = 1500000, max = math.huge, label = "S", color = Color3.fromRGB(255, 215, 0)   },
+        { min = 0,       max = 49999,     label = "D", color = Color3.fromRGB(160, 255, 160) },  -- light green
+        { min = 50000,   max = 149999,    label = "C", color = Color3.fromRGB(0,   200, 80)  },  -- dark green
+        { min = 150000,  max = 499999,    label = "B", color = Color3.fromRGB(80,  130, 235) },  -- blue
+        { min = 500000,  max = 1499999,   label = "A", color = Color3.fromRGB(210, 80,  235) },  -- purple
+        { min = 1500000, max = math.huge, label = "S", color = Color3.fromRGB(255, 215, 0)   },  -- gold
     },
-    BUYABLE_COLOR = Color3.fromRGB(0,   255, 80),
+    BUYABLE_COLOR = Color3.fromRGB(0,   230, 80),
     OWNED_COLOR   = Color3.fromRGB(255, 60,  60),
     FONT          = Enum.Font.GothamBold,
     TEXT_SIZE     = 13,
@@ -114,17 +121,49 @@ local function parsePrice(attr)
     return math.floor(tonumber(s) or 0)
 end
 
+local function isUUID(s)
+    return s and #s > 20 and s:find("%-") ~= nil
+end
+
+local function shortHash(s)
+    return s:sub(1,8).."…"
+end
+
 local function getCarData(model)
-    local owner = model:GetAttribute("Owner") or ""
-    local price = parsePrice(model:GetAttribute("Price"))
-    local rawName = model:GetAttribute("Model") or model.Name
-    -- Truncate UUID names (contain dashes, long)
-    local displayName = rawName
-    if #displayName > 22 and displayName:find("%-") then
-        displayName = displayName:sub(1, 10) .. "…"
+    local owner   = model:GetAttribute("Owner") or ""
+    local price   = parsePrice(model:GetAttribute("Price"))
+    local rawAttr = model:GetAttribute("Model") or model.Name
+    local hash    = model.Name
+    local hashStr = isUUID(hash) and shortHash(hash) or hash
+
+    -- Resolve display name:
+    -- 1. If attr is not a UUID → it's a real name, apply CarNames mapping
+    -- 2. If attr IS a UUID (junkyard car) → try CarNames lookup, fallback to short hash
+    local dispName
+    if not isUUID(rawAttr) then
+        dispName = CarNames and CarNames:GetName(rawAttr) or rawAttr
+    else
+        -- UUID junkyard car — CarNames might map it, otherwise show short hash
+        local looked = CarNames and CarNames:GetName(rawAttr) or nil
+        if looked and looked ~= rawAttr then
+            dispName = looked
+        else
+            -- Try CarList cache
+            local ok, carListEntry = pcall(function()
+                return ReplicatedStorage.Cache.CarList:FindFirstChild(rawAttr)
+            end)
+            if ok and carListEntry then
+                dispName = carListEntry.Value or carListEntry.Name
+            else
+                dispName = shortHash(rawAttr)
+            end
+        end
     end
+
     return {
-        name      = displayName,
+        name      = dispName,
+        fullName  = rawAttr,
+        hash      = hashStr,
         price     = price,
         owner     = owner,
         chance    = model:GetAttribute("SpawnChance")      or 0,
@@ -151,6 +190,18 @@ local function getCondition(vehicle)
     return "?"
 end
 
+-- Read junkyard respawn time from the billboard
+local function getJunkyardRespawnTime()
+    local ok, val = pcall(function()
+        return workspace.Map.FirstCity.Junkyard.JunkyardRespawn.Screen.SurfaceGui.TextLabel.Text
+    end)
+    if ok and val then
+        local n = val:match("%d+")
+        return n and tonumber(n) or nil
+    end
+    return nil
+end
+
 -- ================================================================
 --  ESP GUI
 -- ================================================================
@@ -162,17 +213,15 @@ espGui.Parent         = CoreGui
 _G.CarScriptGui       = espGui
 
 local function rgb(c)
-    return ("rgb(%d,%d,%d)"):format(
-        math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+    return ("rgb(%d,%d,%d)"):format(math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
 end
 
--- Calculate how many lines will be shown (for dynamic height)
 local function calcHeight()
-    local lines = 1  -- tag line always shown
-    if State.showName   then lines += 1 end
+    local lines = 1  -- tag always
+    if State.showName  then lines += 1 end
     if State.showTier or State.showPrice then lines += 1 end
     if State.showProfit or State.showDist then lines += 1 end
-    return math.max(28, lines * 18 + 10)
+    return math.max(28, lines * 18 + 8)
 end
 
 local function createEntry(model)
@@ -180,7 +229,7 @@ local function createEntry(model)
     if not root then return nil end
 
     local bb = Instance.new("BillboardGui")
-    bb.Size                  = UDim2.fromOffset(CFG.BB_W, calcHeight())
+    bb.Size                  = UDim2.fromOffset(CFG.BB_W, 28)
     bb.StudsOffsetWorldSpace = Vector3.new(0, 4.5, 0)
     bb.AlwaysOnTop           = true
     bb.Adornee               = root
@@ -210,8 +259,8 @@ local function createEntry(model)
     label.Parent      = bb
 
     local hl = Instance.new("Highlight")
-    hl.FillColor           = State.fillColor
-    hl.OutlineColor        = State.outlineColor
+    hl.FillColor           = CFG.TIERS[1].color
+    hl.OutlineColor        = CFG.TIERS[1].color
     hl.FillTransparency    = 0.5
     hl.OutlineTransparency = 0
     hl.Adornee             = model
@@ -221,60 +270,59 @@ local function createEntry(model)
     return { bb=bb, shadow=shadow, label=label, hl=hl, root=root }
 end
 
--- Build rich text only from enabled toggles
 local function buildRich(data, dist)
     local tc  = data.isBuyable and CFG.BUYABLE_COLOR or CFG.OWNED_COLOR
     local rc  = data.tier.color
-    local tag = data.isBuyable and "[BUYABLE]" or ("[OWNED: "..data.owner.."]")
+    -- Tag line: [BUYABLE] name(hash) or [OWNED: owner] name(hash)
+    local nameHash = data.name.."("..data.hash..")"
+    local tagLine
+    if data.isBuyable then
+        tagLine = ('<font color="%s"><b>[BUYABLE] %s</b></font>'):format(rgb(tc), nameHash)
+    else
+        tagLine = ('<font color="%s"><b>[OWNED: %s]</b></font> %s'):format(rgb(tc), data.owner, nameHash)
+    end
 
-    local lines = {}
+    local lines = { tagLine }
 
-    -- Line 1: type tag always shown
-    lines[#lines+1] = ('<font color="%s"><b>%s</b></font>'):format(rgb(tc), tag)
-
-    -- Line 2: name (uses TextColor3, no font tag)
+    -- Line 2: detailed name if toggled
     if State.showName then
-        lines[#lines+1] = data.name
+        lines[#lines+1] = data.fullName
     end
 
-    -- Line 3: tier (colored) + price on same line
-    local tierPriceParts = {}
+    -- Line 3: tier + price + chances (chances shows even without tier)
+    local tp = {}
     if State.showTier then
-        local ch = State.showChances and (" "..data.chance.."%") or ""
-        tierPriceParts[#tierPriceParts+1] = ('Tier:<font color="%s"><b>%s</b></font>%s'):format(
-            rgb(rc), data.tier.label, ch)
+        tp[#tp+1] = ('Tier:<font color="%s"><b>%s</b></font>'):format(rgb(rc), data.tier.label)
     end
-    if State.showPrice then
-        tierPriceParts[#tierPriceParts+1] = "$"..fmtNum(data.price)
+    if State.showChances then
+        tp[#tp+1] = tostring(data.chance).."%"
     end
-    if #tierPriceParts > 0 then
-        lines[#lines+1] = table.concat(tierPriceParts, " | ")
-    end
+    if State.showPrice then tp[#tp+1] = "$"..fmtNum(data.price) end
+    if #tp > 0 then lines[#lines+1] = table.concat(tp, " | ") end
 
-    -- Line 4: profit + dist on same line
-    local extraParts = {}
-    if State.showProfit then extraParts[#extraParts+1] = "x"..tostring(data.profit) end
-    if State.showDist   then extraParts[#extraParts+1] = math.floor(dist).." studs" end
-    if #extraParts > 0  then lines[#lines+1] = table.concat(extraParts, " | ") end
+    -- Line 4: profit + dist
+    local ep = {}
+    if State.showProfit then ep[#ep+1] = "x"..tostring(data.profit) end
+    if State.showDist   then ep[#ep+1] = math.floor(dist).." studs" end
+    if #ep > 0 then lines[#lines+1] = table.concat(ep, " | ") end
 
     return table.concat(lines, "\n")
 end
 
 local function buildPlain(data, dist)
-    local tag = data.isBuyable and "[BUYABLE]" or ("[OWNED: "..data.owner.."]")
+    local nameHash = data.name.."("..data.hash..")"
+    local tag = data.isBuyable and ("[BUYABLE] "..nameHash) or ("[OWNED: "..data.owner.."] "..nameHash)
     local lines = { tag }
-    if State.showName then lines[#lines+1] = data.name end
-    local tierPriceParts = {}
-    if State.showTier then
-        local ch = State.showChances and (" "..data.chance.."%") or ""
-        tierPriceParts[#tierPriceParts+1] = "Tier:"..data.tier.label..ch
-    end
-    if State.showPrice then tierPriceParts[#tierPriceParts+1] = "$"..fmtNum(data.price) end
-    if #tierPriceParts > 0 then lines[#lines+1] = table.concat(tierPriceParts, " | ") end
-    local extraParts = {}
-    if State.showProfit then extraParts[#extraParts+1] = "x"..tostring(data.profit) end
-    if State.showDist   then extraParts[#extraParts+1] = math.floor(dist).." studs" end
-    if #extraParts > 0  then lines[#lines+1] = table.concat(extraParts, " | ") end
+    if State.showName then lines[#lines+1] = data.fullName end
+    local tp = {}
+    if State.showTier  then tp[#tp+1] = "Tier:"..data.tier.label end
+    if State.showChances then tp[#tp+1] = tostring(data.chance).."%" end
+    if State.showPrice then tp[#tp+1] = "$"..fmtNum(data.price) end
+    if #tp > 0 then lines[#lines+1] = table.concat(tp, " | ") end
+    local ep = {}
+    if State.showProfit then ep[#ep+1] = "x"..tostring(data.profit) end
+    if State.showDist   then ep[#ep+1] = math.floor(dist).." studs" end
+    if #ep > 0 then lines[#lines+1] = table.concat(ep, " | ") end
     return table.concat(lines, "\n")
 end
 
@@ -315,36 +363,33 @@ track(VehicleFolder.ChildAdded:Connect(addEntry))
 track(VehicleFolder.ChildRemoved:Connect(removeEntry))
 
 -- ================================================================
---  RESPAWN NOTIF (debounced)
+--  RESPAWN WAVE NOTIF  (count buyable cars added in a wave)
 -- ================================================================
 local respawnQueue    = 0
 local respawnDebounce = false
 
 track(VehicleFolder.ChildAdded:Connect(function(model)
-    if not _alive or not State.respawnNotif then return end
-    -- Only count buyable (junkyard) cars
+    if not _alive or not State.respawnWaveNotif then return end
     task.spawn(function()
-        task.wait(0.3)
+        task.wait(0.4)
         if not model.Parent then return end
         local owner = model:GetAttribute("Owner") or ""
         if owner ~= "" then return end
         respawnQueue += 1
         if respawnDebounce then return end
         respawnDebounce = true
-        task.wait(1.0)  -- collect all cars added in the same respawn wave
-        local limit = State.notifLimit
+        task.wait(2.0)
         local count = respawnQueue
         respawnQueue    = 0
         respawnDebounce = false
-        if limit == 0 then
-            -- notify all
-            Library:Notify(("Junkyard respawned! %d car(s)"):format(count), 5)
-        else
-            -- only notify if count meets threshold
-            if count >= limit then
-                Library:Notify(("Junkyard respawned! %d car(s)"):format(count), 5)
+        -- Send 6 notifs per respawn wave, with 5-6s delay between each
+        task.spawn(function()
+            for i = 1, 6 do
+                if not _alive then return end
+                Library:Notify(("🔔 Junkyard spawned! %d car(s)"):format(count), 5)
+                task.wait(5.5)
             end
-        end
+        end)
     end)
 end))
 
@@ -370,6 +415,9 @@ local function refreshGarage()
     if Options.GaragePicker then
         Options.GaragePicker:SetValues(#garageList>0 and garageList or {"(empty)"})
     end
+    if Options.MainCarPicker then
+        Options.MainCarPicker:SetValues(#garageList>0 and garageList or {"(none)"})
+    end
 end
 
 local function spawnCar()
@@ -386,6 +434,84 @@ end
 
 track(Garage.ChildAdded:Connect(function() task.wait(0.5); refreshGarage() end))
 track(Garage.ChildRemoved:Connect(function() task.wait(0.5); refreshGarage() end))
+
+-- ================================================================
+--  TELEPORT DESTINATIONS
+-- ================================================================
+local TeleDestinations = {
+    ['Garage'] = function()
+        local p = workspace.Garages.Default.Exterior.Road
+        if p:IsA("BasePart") then return p.CFrame end
+        return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+    end,
+    ['Junkyard'] = function()
+        local p = workspace.Map.FirstCity.Junkyard.Decor:GetChildren()[53]
+        if p:IsA("BasePart") then return p.CFrame end
+        return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+    end,
+    ['Spare Parts (Shop)'] = function()
+        local m = workspace.Map.FirstCity.SparePartsShop.SparePartsShop["Cash out area"]
+        return (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart")).CFrame
+    end,
+    ['AutoShop (Repair)'] = function()
+        local p = workspace.Map.FirstCity.Buildings["PitStop(Large)"]:GetChildren()[88]
+        if p:IsA("BasePart") then return p.CFrame end
+        return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+    end,
+    ['AutoCustoms (Body)'] = function()
+        local ok, result = pcall(function()
+            local container = workspace.Map.Map:GetChildren()[1690]
+            -- container might be a Model - find any BasePart inside it
+            local p = container:FindFirstChildWhichIsA("BasePart")
+            if p then return p.CFrame end
+            for _, c in ipairs(container:GetChildren()) do
+                local bp = c:IsA("BasePart") and c or c:FindFirstChildWhichIsA("BasePart")
+                if bp then return bp.CFrame end
+            end
+        end)
+        return ok and result or nil
+    end,
+    ['PitWheels'] = function()
+        local ok, result = pcall(function()
+            local p = workspace.Map:GetChildren()[9]["jantes pneus"].TireShop.pneus
+            if p:IsA("BasePart") then return p.CFrame end
+            return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+        end)
+        return ok and result or nil
+    end,
+    ['ApexTyres'] = function()
+        local ok, result = pcall(function()
+            local p = workspace.Map.Map.apextyres
+            if p:IsA("BasePart") then return p.CFrame end
+            return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+        end)
+        return ok and result or nil
+    end,
+    ['Gas Station'] = function()
+        local ok, result = pcall(function()
+            local b = workspace.Map.FirstCity.Buildings:GetChildren()[80]
+            local p = b:FindFirstChild("Road") or b.PrimaryPart or b:FindFirstChildWhichIsA("BasePart")
+            return p.CFrame
+        end)
+        return ok and result or nil
+    end,
+    ['Sell'] = function()
+        local ok, result = pcall(function()
+            local p = workspace.Map.Map.Barraca.Part
+            if p:IsA("BasePart") then return p.CFrame end
+            return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+        end)
+        return ok and result or nil
+    end,
+    ['Dyno Tune'] = function()
+        local ok, result = pcall(function()
+            local p = workspace.Map.Map.dynotune:GetChildren()[7]
+            if p:IsA("BasePart") then return p.CFrame end
+            return (p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")).CFrame
+        end)
+        return ok and result or nil
+    end,
+}
 
 -- ================================================================
 --  LINORIA
@@ -412,117 +538,73 @@ local Tabs = {
     UI       = Window:AddTab('UI Settings'),
 }
 
-local CarGroup   = Tabs.Main:AddLeftGroupbox('Car')
-local TeleGroup  = Tabs.Main:AddLeftGroupbox('Teleporting')
-local SpawnGroup = Tabs.Main:AddRightGroupbox('Spawn Car')
-local ShopGroup  = Tabs.Main:AddRightGroupbox('Shop')
-local JunkCfg    = Tabs.Junkyard:AddLeftGroupbox('Configuration')
-local LabelGroup = Tabs.Junkyard:AddLeftGroupbox('ESP Labels')
-local TierGroup  = Tabs.Junkyard:AddRightGroupbox('Tiers')
-local FarmMain   = Tabs.Farm:AddLeftGroupbox('AutoFarm')
-local FarmInfo   = Tabs.Farm:AddRightGroupbox('Info')
-local MenuGroup  = Tabs.UI:AddLeftGroupbox('Menu')
+local CarGroup    = Tabs.Main:AddLeftGroupbox('Car')
+local TeleGroup   = Tabs.Main:AddLeftGroupbox('Teleporting')
+local SpawnGroup  = Tabs.Main:AddRightGroupbox('Owned Cars')
+local ShopGroup   = Tabs.Main:AddRightGroupbox('Shop')
+local JunkCfg     = Tabs.Junkyard:AddLeftGroupbox('Configuration')
+local LabelGroup  = Tabs.Junkyard:AddLeftGroupbox('ESP Labels')
+local TierGroup   = Tabs.Junkyard:AddRightGroupbox('Tiers')
+local FarmMain    = Tabs.Farm:AddLeftGroupbox('AutoFarm')
+local FarmInfo    = Tabs.Farm:AddRightGroupbox('Info')
+local MenuGroup   = Tabs.UI:AddLeftGroupbox('Menu')
 
 -- ================================================================
---  MAIN TAB – Car Info
+--  MAIN TAB – Car
 -- ================================================================
-local carNameLbl  = CarGroup:AddLabel("Name: —")
-local carCondLbl  = CarGroup:AddLabel("Condition: —")
+-- Dropdown to select which garage car to track
+local carNameLbl  = CarGroup:AddLabel("Name:  —")
+local carHashLbl  = CarGroup:AddLabel("Hash:  —")
+local carCondLbl  = CarGroup:AddLabel("Cond:  —")
 local carPriceLbl = CarGroup:AddLabel("Price: —")
 
-CarGroup:AddButton({ Text='Respawn Car', DoubleClick=false, Tooltip='Respawn your car',
+CarGroup:AddDropdown('MainCarPicker', {
+    Values  = { '(none)' },
+    Default = '(none)',
+    Multi   = false,
+    Text    = 'Select Car',
+    Tooltip = 'Pick a garage car to track on MAIN tab',
+    Callback = function(_) end,
+})
+CarGroup:AddButton({ Text='Respawn Car', DoubleClick=false,
     Func=function() print('[CarScript] Respawn fired'); Library:Notify('Respawn sent') end })
-CarGroup:AddButton({ Text='Repair Car', DoubleClick=false, Tooltip='Repair your car',
+CarGroup:AddButton({ Text='Repair Car', DoubleClick=false,
     Func=function() print('[CarScript] Repair fired'); Library:Notify('Repair sent') end })
-CarGroup:AddButton({ Text='Sell Car', DoubleClick=true, Tooltip='Double-click to sell',
+CarGroup:AddButton({ Text='Sell Car', DoubleClick=true,
     Func=function() print('[CarScript] Sell fired'); Library:Notify('Sell sent') end })
+CarGroup:AddButton({ Text='🔔 Test Notif', DoubleClick=false,
+    Func=function()
+        task.spawn(function()
+            for i = 1, 6 do
+                if not _alive then return end
+                Library:Notify("🔔 Test Notification ["..i.."/6]", 5)
+                task.wait(5.5)
+            end
+        end)
+    end
+})
 
 -- ================================================================
 --  MAIN TAB – Teleport
 -- ================================================================
 TeleGroup:AddDropdown('TeleLocation', {
     Values  = { 'Garage','Junkyard','Spare Parts (Shop)','AutoShop (Repair)',
-                'AutoCustoms (Body Parts)','PitWheels','Gas Station','Sell','Dyno Tune' },
-    Default = 'Garage',
-    Multi   = false,
-    Text    = 'Location',
-    Callback = function(_) end,
+                'AutoCustoms (Body)','PitWheels','ApexTyres','Gas Station','Sell','Dyno Tune' },
+    Default = 'Garage', Multi=false, Text='Location', Callback=function(_) end,
 })
-
-local TeleDestinations = {
-    ['Garage'] = function()
-        local p = workspace.Garages.Default.Exterior.Road
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-    ['Junkyard'] = function()
-        local p = workspace.Map.FirstCity.Junkyard.Decor:GetChildren()[53]
-        if not p then return nil end
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-    ['Spare Parts (Shop)'] = function()
-        local m = workspace.Map.FirstCity.SparePartsShop.SparePartsShop["Cash out area"]
-        local bp = m and (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart"))
-        return bp and bp.CFrame
-    end,
-    ['AutoShop (Repair)'] = function()
-        local p = workspace.Map.FirstCity.Buildings["PitStop(Large)"]:GetChildren()[88]
-        if not p then return nil end
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-    ['AutoCustoms (Body Parts)'] = function()
-        local p = workspace.Map.Map:GetChildren()[1690]:GetChildren()[45]
-        if not p then return nil end
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-    ['PitWheels'] = function()
-        local p = workspace.Map.FirstCity.Buildings:GetChildren()[124]
-        if not p then return nil end
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-    ['Gas Station'] = function()
-        local b = workspace.Map.FirstCity.Buildings:GetChildren()[80]
-        if not b then return nil end
-        local p = b:FindFirstChild("Road") or b.PrimaryPart or b:FindFirstChildWhichIsA("BasePart")
-        return p and p.CFrame
-    end,
-    ['Sell'] = function()
-        local p = workspace.Map.Map.Barraca.Part
-        if not p then return nil end
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-    ['Dyno Tune'] = function()
-        local p = workspace.Map.Map.dynotune:GetChildren()[17]
-        if not p then return nil end
-        if p:IsA("BasePart") then return p.CFrame end
-        local bp = p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
-        return bp and bp.CFrame
-    end,
-}
-
-TeleGroup:AddButton({ Text='Teleport', DoubleClick=false, Tooltip='Teleport to selected location',
+TeleGroup:AddButton({ Text='Teleport', DoubleClick=false,
     Func=function()
-        local loc   = Options.TeleLocation and Options.TeleLocation.Value or 'Garage'
+        local loc    = Options.TeleLocation and Options.TeleLocation.Value or 'Garage'
         local destFn = TeleDestinations[loc]
-        local ok, cf = pcall(function() return destFn and destFn() end)
+        if not destFn then Library:Notify("No dest for: "..loc); return end
+        local ok, cf = pcall(destFn)
         if ok and cf then
             local hrp = (LocalPlayer.Character or {}).HumanoidRootPart
             if hrp then hrp.CFrame = cf + Vector3.new(0,5,0); Library:Notify("→ "..loc)
             else Library:Notify("No character") end
         else
-            Library:Notify("Path error for: "..loc)
-            warn("[CarScript] Tele error:", cf)
+            Library:Notify("Path error: "..loc)
+            warn("[CarScript] Tele:", cf)
         end
     end
 })
@@ -553,52 +635,67 @@ local function buyPart()
     local cat  = Options.ShopCategory and Options.ShopCategory.Value
     local item = Options.ShopItem     and Options.ShopItem.Value
     if not cat or not item or item == "—" then Library:Notify("Select category & item!"); return end
-    local partModel = workspace.PartsStore
-        and workspace.PartsStore.SpareParts
+    local pm = workspace.PartsStore and workspace.PartsStore.SpareParts
         and workspace.PartsStore.SpareParts.Parts
         and workspace.PartsStore.SpareParts.Parts:FindFirstChild(cat)
         and workspace.PartsStore.SpareParts.Parts[cat]:FindFirstChild(item)
-    if not partModel then Library:Notify("Part not found: "..cat.."/"..item); return end
-    local ok, err = pcall(function() PartsEvent:FireServer(partModel) end)
+    if not pm then Library:Notify("Part not found: "..cat.."/"..item); return end
+    local ok, err = pcall(function() PartsEvent:FireServer(pm) end)
     if ok then Library:Notify("Bought: "..item)
     else Library:Notify("Buy failed: "..tostring(err)); warn("[CarScript]", err) end
 end
 
-ShopGroup:AddButton({ Text='Buy', DoubleClick=false, Func=buyPart, Tooltip='Buy via PartsEvent' })
+ShopGroup:AddButton({ Text='Buy Part', DoubleClick=false, Func=buyPart, Tooltip='Buy via PartsEvent' })
 
 -- ================================================================
 --  JUNKYARD TAB – Configuration
 -- ================================================================
-JunkCfg:AddToggle('RespawnNotif', {
-    Text='Respawn Notify', Default=false, Tooltip='Notify when junkyard cars respawn',
-    Callback=function(v) State.respawnNotif = v end,
+-- Respawn billboard notif (reads the RESPAWN IN X SECONDS sign)
+JunkCfg:AddToggle('RespawnBillboard', {
+    Text='Respawn Timer Notif', Default=false,
+    Tooltip='Notify at set intervals using the junkyard billboard timer',
+    Callback=function(v) State.respawnBillboard=v end,
 })
-JunkCfg:AddSlider('NotifLimit', {
-    Text='Notify Threshold (0=all)', Default=0, Min=0, Max=10, Rounding=0,
-    Tooltip='Min cars in wave to trigger notify (0 = always)',
-    Callback=function(v) State.notifLimit = v end,
+JunkCfg:AddDropdown('RespawnInterval', {
+    Values  = {'5','10','15','20','30','45','60','90','180'},
+    Default = '30', Multi=false,
+    Text    = 'Notify every N seconds',
+    Callback = function(v) State.respawnInterval = tonumber(v) or 30 end,
 })
+JunkCfg:AddToggle('RespawnWaveNotif', {
+    Text='Respawn Wave Notif', Default=false,
+    Tooltip='Send 6 notifs (5s apart) when junkyard cars actually spawn',
+    Callback=function(v) State.respawnWaveNotif=v end,
+})
+
+JunkCfg:AddDivider()
+
+-- ESP controls in logical order
 JunkCfg:AddToggle('ESPEnabled', {
-    Text='Junkyard ESP', Default=false, Tooltip='Show ESP labels',
+    Text='Junkyard ESP  ← enable first', Default=false,
+    Tooltip='Master toggle — enable this before using tiers/labels',
     Callback=function(v)
-        State.espEnabled = v
-        if not v then for _, e in pairs(_entries) do e.bb.Enabled=false; e.hl.Enabled=false end end
-    end,
-})
-JunkCfg:AddToggle('HLEnabled', {
-    Text='Highlights (Chams)', Default=false,
-    Callback=function(v)
-        State.hlEnabled = v
-        if not v then for _, e in pairs(_entries) do e.hl.Enabled=false end end
+        State.espEnabled=v
+        if not v then for _,e in pairs(_entries) do e.bb.Enabled=false; e.hl.Enabled=false end end
     end,
 })
 JunkCfg:AddToggle('ShowBuyable', { Text='Show Buyable', Default=false, Callback=function(v) State.showBuyable=v end })
 JunkCfg:AddToggle('ShowOwned',   { Text='Show Owned',   Default=false, Callback=function(v) State.showOwned=v   end })
-JunkCfg:AddToggle('FillColorEnabled', { Text='Fill Color', Default=false,
+JunkCfg:AddToggle('HLEnabled', {
+    Text='Highlights (Chams)', Default=false,
+    Callback=function(v)
+        State.hlEnabled=v
+        if not v then for _,e in pairs(_entries) do e.hl.Enabled=false end end
+    end,
+})
+
+JunkCfg:AddDivider()
+
+JunkCfg:AddToggle('FillColorEnabled', { Text='Fill Color (else tier)', Default=false,
     Callback=function(v) State.useFillColor=v end,
 }):AddColorPicker('FillColor', { Default=Color3.fromRGB(0,100,255), Title='Fill Color',
     Callback=function(v) State.fillColor=v end })
-JunkCfg:AddToggle('OutlineColorEnabled', { Text='Outline Color', Default=false,
+JunkCfg:AddToggle('OutlineColorEnabled', { Text='Outline Color (else tier)', Default=false,
     Callback=function(v) State.useOutlineColor=v end,
 }):AddColorPicker('OutlineColor', { Default=Color3.fromRGB(0,170,255), Title='Outline Color',
     Callback=function(v) State.outlineColor=v end })
@@ -615,7 +712,7 @@ JunkCfg:AddSlider('ESPDistance', {
 --  JUNKYARD TAB – ESP Labels
 -- ================================================================
 LabelGroup:AddToggle('ShowChances', { Text='Show Chances',  Default=false, Callback=function(v) State.showChances=v end })
-LabelGroup:AddToggle('ShowName',    { Text='Show Name',     Default=false, Callback=function(v) State.showName=v    end })
+LabelGroup:AddToggle('ShowName',    { Text='Show Full Name',Default=false, Callback=function(v) State.showName=v    end })
 LabelGroup:AddToggle('ShowTier',    { Text='Show Tier',     Default=false, Callback=function(v) State.showTier=v    end })
 LabelGroup:AddToggle('ShowPrice',   { Text='Show Price',    Default=false, Callback=function(v) State.showPrice=v   end })
 LabelGroup:AddToggle('ShowProfit',  { Text='Show Profit',   Default=false, Callback=function(v) State.showProfit=v  end })
@@ -624,26 +721,55 @@ LabelGroup:AddToggle('ShowDist',    { Text='Show Distance', Default=false, Callb
 -- ================================================================
 --  JUNKYARD TAB – Tiers
 -- ================================================================
-TierGroup:AddToggle('ShowTierS', { Text='Tier S  (Gold)',   Default=false, Callback=function(v) State.showS=v end })
-TierGroup:AddToggle('ShowTierA', { Text='Tier A  (Purple)', Default=false, Callback=function(v) State.showA=v end })
-TierGroup:AddToggle('ShowTierB', { Text='Tier B  (Blue)',   Default=false, Callback=function(v) State.showB=v end })
-TierGroup:AddToggle('ShowTierC', { Text='Tier C  (Green)',  Default=false, Callback=function(v) State.showC=v end })
-TierGroup:AddToggle('ShowTierD', { Text='Tier D  (Gray)',   Default=false, Callback=function(v) State.showD=v end })
+TierGroup:AddLabel("Enable ESP first →")
+TierGroup:AddLabel("(Junkyard ESP + Buyable/Owned)")
+TierGroup:AddToggle('ShowTierS', { Text='Tier S  (Gold)',       Default=false, Callback=function(v) State.showS=v end })
+TierGroup:AddToggle('ShowTierA', { Text='Tier A  (Purple)',     Default=false, Callback=function(v) State.showA=v end })
+TierGroup:AddToggle('ShowTierB', { Text='Tier B  (Blue)',       Default=false, Callback=function(v) State.showB=v end })
+TierGroup:AddToggle('ShowTierC', { Text='Tier C  (Dark Green)', Default=false, Callback=function(v) State.showC=v end })
+TierGroup:AddToggle('ShowTierD', { Text='Tier D  (Lt. Green)',  Default=false, Callback=function(v) State.showD=v end })
 
 -- ================================================================
 --  FARM TAB
 -- ================================================================
-FarmMain:AddToggle('FarmEnabled', { Text='Enable AutoFarm', Default=false,
-    Callback=function(v) State.farmEnabled=v end })
-FarmMain:AddDropdown('FarmMode', { Values={'fix','buy'}, Default='fix', Multi=false, Text='Mode',
-    Tooltip='"fix" repairs  |  "buy" buys parts', Callback=function(v) State.farmMode=v end })
-FarmMain:AddSlider('FarmTick', { Text='Tick Rate (s)', Default=1, Min=0, Max=10, Rounding=1,
-    Callback=function(v) State.farmTick=v end })
-FarmInfo:AddLabel('fix  – fires Repair remote')
-FarmInfo:AddLabel('buy  – fires PartsEvent')
+FarmMain:AddToggle('FarmEnabled', {
+    Text='Enable AutoFarm', Default=false,
+    Tooltip='Master switch — turns off all farm processes when disabled',
+    Callback=function(v) State.farmEnabled=v end,
+})
+FarmMain:AddDropdown('FarmMode', {
+    Values   = { 'fix', 'repair' },
+    Default  = 'fix',
+    Multi    = false,
+    Text     = 'Mode',
+    Tooltip  = 'fix = buy ALL parts needed + sell | repair = buy only broken parts + sell',
+    Callback = function(v) State.farmMode=v end,
+})
+FarmMain:AddSlider('FarmTick', {
+    Text    = 'Tick Rate (s)',
+    Default = 3, Min=0.5, Max=30, Rounding=1,
+    Tooltip = 'Seconds between each farm action (e.g. 3s = buy/fix every 3s)',
+    Callback=function(v) State.farmTick=v end,
+})
+FarmMain:AddButton({ Text='⏹ Override OFF (stop all)', DoubleClick=false,
+    Func=function()
+        State.farmEnabled = false
+        if Options.FarmEnabled then
+            Options.FarmEnabled:SetValue(false)
+        end
+        Library:Notify('AutoFarm stopped.')
+    end,
+    Tooltip = 'Force-stop all farm processes immediately'
+})
+
+FarmInfo:AddLabel('fix    – buy ALL parts for car')
+FarmInfo:AddLabel('         make condition 100%')
+FarmInfo:AddLabel('         then auto sell')
 FarmInfo:AddLabel(' ')
-FarmInfo:AddLabel('Select item in Shop tab')
-FarmInfo:AddLabel('before enabling buy mode.')
+FarmInfo:AddLabel('repair – buy only the broken')
+FarmInfo:AddLabel('         parts, then auto sell')
+FarmInfo:AddLabel(' ')
+FarmInfo:AddLabel('Tick = delay between actions')
 
 -- ================================================================
 --  UI SETTINGS TAB
@@ -657,7 +783,7 @@ MenuGroup:AddToggle('KeybindList', { Text='Keybind List', Default=false,
 
 Library.ToggleKeybind       = Options.MenuKeybind
 Library.KeybindFrame.Visible = false
-Library:SetWatermark(string.format("CarScript | %s | %s", LocalPlayer.Name, os.date("%H:%M:%S")))
+Library:SetWatermark(string.format("CarScript | %s", LocalPlayer.Name))
 Library:SetWatermarkVisibility(false)
 Library:OnUnload(function() _G.CarScriptKill(); print('[CarScript] Unloaded') end)
 
@@ -690,38 +816,25 @@ track(RunService.RenderStepped:Connect(function(dt)
     for model, entry in pairs(_entries) do
         if not _alive then return end
         if not model or not model.Parent then removeEntry(model); continue end
-
         local root = entry.root
-        if not root or not root.Parent then
-            entry.bb.Enabled=false; entry.hl.Enabled=false; continue
-        end
+        if not root or not root.Parent then entry.bb.Enabled=false; entry.hl.Enabled=false; continue end
 
         local dist = (root.Position - origin).Magnitude
-        if dist > State.espDistance then
-            entry.bb.Enabled=false; entry.hl.Enabled=false; continue
-        end
+        if dist > State.espDistance then entry.bb.Enabled=false; entry.hl.Enabled=false; continue end
 
         local data    = getCarData(model)
         local tierKey = TIER_SHOW[data.tier.label]
-        if tierKey and not State[tierKey] then
+        if tierKey and not State[tierKey] then entry.bb.Enabled=false; entry.hl.Enabled=false; continue end
+        if (data.isBuyable and not State.showBuyable) or (not data.isBuyable and not State.showOwned) then
             entry.bb.Enabled=false; entry.hl.Enabled=false; continue
         end
 
-        if (data.isBuyable and not State.showBuyable)
-        or (not data.isBuyable and not State.showOwned) then
-            entry.bb.Enabled=false; entry.hl.Enabled=false; continue
-        end
-
-        -- Update billboard height based on current toggle state
-        entry.bb.Size = UDim2.fromOffset(CFG.BB_W, calcHeight())
-
-        entry.label.Text       = buildRich(data, dist)
-        -- Text color: custom when toggle ON, else white (RichText tag/tier use own colors)
+        entry.bb.Size        = UDim2.fromOffset(CFG.BB_W, calcHeight())
+        entry.label.Text     = buildRich(data, dist)
         entry.label.TextColor3 = State.useTextColor and State.textColor or Color3.new(1,1,1)
-        entry.shadow.Text      = buildPlain(data, dist)
-        entry.bb.Enabled       = true
+        entry.shadow.Text    = buildPlain(data, dist)
+        entry.bb.Enabled     = true
 
-        -- Chams: tier color by default, custom fill/outline only when toggle is ON
         if State.hlEnabled then
             local tierCol = data.tier.color
             entry.hl.FillColor    = State.useFillColor    and State.fillColor    or tierCol
@@ -730,6 +843,37 @@ track(RunService.RenderStepped:Connect(function(dt)
         else
             entry.hl.Enabled = false
         end
+    end
+end))
+
+-- ── RESPAWN BILLBOARD NOTIF ───────────────────────────────────────
+local cycleStartTime = nil
+local lastBillboard  = nil
+local lastBucket     = -1
+
+track(RunService.Heartbeat:Connect(function()
+    if not _alive or not State.respawnBillboard then return end
+    local t = getJunkyardRespawnTime()
+    if not t then return end
+
+    -- Detect new cycle: t jumped UP (timer reset to ~180)
+    if lastBillboard and t > lastBillboard + 5 then
+        cycleStartTime = tick() - (180 - t)
+        lastBucket     = -1
+    end
+    if not cycleStartTime then
+        cycleStartTime = tick() - (180 - t)
+    end
+    lastBillboard = t
+
+    local elapsed    = math.floor(tick() - cycleStartTime)
+    local interval   = State.respawnInterval
+    local currBucket = math.floor(elapsed / interval)
+
+    -- Only notify when bucket number INCREASES (once per interval period)
+    if currBucket > lastBucket and currBucket > 0 then
+        lastBucket = currBucket
+        Library:Notify(("⏱ Spawn in %ds | elapsed %ds"):format(t, elapsed), 4)
     end
 end))
 
@@ -742,22 +886,15 @@ track(RunService.Heartbeat:Connect(function(dt)
     farmTimer = 0
 
     if State.farmMode == 'fix' then
-        print('[AutoFarm] FIX tick')
-        Library:Notify('AutoFarm: FIX', 1)
-    elseif State.farmMode == 'buy' then
-        local cat  = Options.ShopCategory and Options.ShopCategory.Value
-        local item = Options.ShopItem     and Options.ShopItem.Value
-        if cat and item and item ~= "—" then
-            local pm = workspace.PartsStore and workspace.PartsStore.SpareParts
-                and workspace.PartsStore.SpareParts.Parts
-                and workspace.PartsStore.SpareParts.Parts:FindFirstChild(cat)
-                and workspace.PartsStore.SpareParts.Parts[cat]:FindFirstChild(item)
-            if pm then
-                pcall(function() PartsEvent:FireServer(pm) end)
-                print('[AutoFarm] BUY →', cat, item)
-                Library:Notify('AutoFarm: BUY '..item, 1)
-            end
-        end
+        -- TODO: buy ALL parts for car → sell
+        -- Needs: parts list remote, buy remote, sell remote
+        print('[AutoFarm] FIX tick – buy all parts + sell (TODO: wire remotes)')
+        Library:Notify('Farm: FIX tick', 1)
+    elseif State.farmMode == 'repair' then
+        -- TODO: buy only broken parts → sell
+        -- Needs: condition check, parts event, sell remote
+        print('[AutoFarm] REPAIR tick – buy broken parts + sell (TODO: wire remotes)')
+        Library:Notify('Farm: REPAIR tick', 1)
     end
 end))
 
@@ -773,7 +910,7 @@ track(RunService.RenderStepped:Connect(function()
     end
 end))
 
--- ── CAR INFO ─────────────────────────────────────────────────────
+-- ── CAR INFO (seated car) ─────────────────────────────────────────
 track(RunService.Heartbeat:Connect(function()
     if not _alive then return end
     local char = LocalPlayer.Character
@@ -783,13 +920,29 @@ track(RunService.Heartbeat:Connect(function()
     if veh and veh ~= workspace and VehicleFolder:FindFirstChild(veh.Name) then
         local data = getCarData(veh)
         local cond = getCondition(veh)
-        pcall(function() carNameLbl:SetText("Name: "..data.name) end)
-        pcall(function() carCondLbl:SetText("Condition: "..tostring(cond).."%") end)
+        pcall(function() carNameLbl:SetText("Name:  "..data.name) end)
+        pcall(function() carHashLbl:SetText("Hash:  "..data.hash) end)
+        pcall(function() carCondLbl:SetText("Cond:  "..tostring(cond).."%") end)
         pcall(function() carPriceLbl:SetText("Price: $"..fmtNum(data.price)) end)
     else
-        pcall(function() carNameLbl:SetText("Name: —") end)
-        pcall(function() carCondLbl:SetText("Condition: —") end)
-        pcall(function() carPriceLbl:SetText("Price: —") end)
+        -- Show selected garage car info
+        local sel = Options.MainCarPicker and Options.MainCarPicker.Value
+        local entry = sel and garageMap[sel]
+        if entry then
+            local vals = entry:FindFirstChild("Values")
+            local rawName = entry:GetAttribute("Model") or entry.Name
+            local hash = isUUID(entry.Name) and shortHash(entry.Name) or entry.Name
+            local price = parsePrice(entry:GetAttribute("Price"))
+            pcall(function() carNameLbl:SetText("Name:  "..rawName) end)
+            pcall(function() carHashLbl:SetText("Hash:  "..hash) end)
+            pcall(function() carCondLbl:SetText("Cond:  (not driving)") end)
+            pcall(function() carPriceLbl:SetText("Price: $"..fmtNum(price)) end)
+        else
+            pcall(function() carNameLbl:SetText("Name:  —") end)
+            pcall(function() carHashLbl:SetText("Hash:  —") end)
+            pcall(function() carCondLbl:SetText("Cond:  —") end)
+            pcall(function() carPriceLbl:SetText("Price: —") end)
+        end
     end
 end))
 
@@ -799,6 +952,8 @@ end))
 task.spawn(function()
     task.wait(1)
     refreshGarage()
+
+    -- Load shop parts
     local ok, spareParts = pcall(function()
         return workspace:WaitForChild("PartsStore", 10).SpareParts.Parts
     end)
@@ -822,6 +977,7 @@ task.spawn(function()
             end)
         end
     end
+
     Library:Notify(string.format("CarScript loaded | Garage: %d | Vehicles: %d",
         #garageList, #VehicleFolder:GetChildren()), 4)
 end)
