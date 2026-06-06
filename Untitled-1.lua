@@ -41,9 +41,40 @@ local Garage        = PlayerData:WaitForChild("Garage")
 local RemoteLoad = ReplicatedStorage:WaitForChild("Events"):WaitForChild("Vehicles"):WaitForChild("RemoteLoad")
 local PartsEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("PartsEvent")
 
--- Car name lookup via CarNames module
+-- Car name lookup via CarNames module (brand alias mapping)
 local CarNames = nil
 pcall(function() CarNames = require(ReplicatedStorage.Modules.CarNames) end)
+
+-- CarList lookup: BoolValue.Name = display name, attrs = SpawnChance + Price
+-- Used to resolve UUID junkyard cars → real car name
+local carListByKey = {}   -- [spawnChance.."_"..priceAttr] = displayName
+local carListLoaded = false
+
+task.spawn(function()
+    local ok, CarList = pcall(function()
+        return ReplicatedStorage:WaitForChild("Cache", 10):WaitForChild("CarList", 10)
+    end)
+    if ok and CarList then
+        for _, child in ipairs(CarList:GetChildren()) do
+            local sc = child:GetAttribute("SpawnChance")
+            local pr = child:GetAttribute("Price")
+            if sc ~= nil and pr then
+                local key = tostring(sc).."_"..tostring(pr)
+                carListByKey[key] = child.Name
+            end
+        end
+        carListLoaded = true
+        print(("[CarScript] CarList loaded: %d entries"):format(#CarList:GetChildren()))
+    else
+        print("[CarScript] CarList not found")
+    end
+end)
+
+local function carListLookup(chance, priceAttr)
+    if not priceAttr then return nil end
+    local key = tostring(chance).."_"..tostring(priceAttr)
+    return carListByKey[key]
+end
 
 local gameName = "Fix It Up"
 pcall(function() gameName = MarketplaceService:GetProductInfo(game.PlaceId).Name end)
@@ -130,33 +161,27 @@ local function shortHash(s)
 end
 
 local function getCarData(model)
-    local owner   = model:GetAttribute("Owner") or ""
-    local price   = parsePrice(model:GetAttribute("Price"))
-    local rawAttr = model:GetAttribute("Model") or model.Name
-    local hash    = model.Name
-    local hashStr = isUUID(hash) and shortHash(hash) or hash
+    local owner      = model:GetAttribute("Owner") or ""
+    local priceAttr  = model:GetAttribute("Price")
+    local price      = parsePrice(priceAttr)
+    local rawAttr    = model:GetAttribute("Model") or model.Name
+    local hash       = model.Name
+    local hashStr    = isUUID(hash) and shortHash(hash) or hash
+    local chance     = model:GetAttribute("SpawnChance") or 0
 
-    -- Resolve display name:
-    -- 1. If attr is not a UUID → it's a real name, apply CarNames mapping
-    -- 2. If attr IS a UUID (junkyard car) → try CarNames lookup, fallback to short hash
+    -- Resolve display name
     local dispName
     if not isUUID(rawAttr) then
+        -- Owned car: attr Model IS the real name → apply CarNames brand alias
         dispName = CarNames and CarNames:GetName(rawAttr) or rawAttr
     else
-        -- UUID junkyard car — CarNames might map it, otherwise show short hash
-        local looked = CarNames and CarNames:GetName(rawAttr) or nil
-        if looked and looked ~= rawAttr then
+        -- Junkyard car: attr Model is a UUID → match via SpawnChance + Price in CarList
+        local key    = tostring(chance).."_"..tostring(priceAttr or "")
+        local looked = carListLookup(chance, priceAttr)
+        if looked then
             dispName = looked
         else
-            -- Try CarList cache
-            local ok, carListEntry = pcall(function()
-                return ReplicatedStorage.Cache.CarList:FindFirstChild(rawAttr)
-            end)
-            if ok and carListEntry then
-                dispName = carListEntry.Value or carListEntry.Name
-            else
-                dispName = shortHash(rawAttr)
-            end
+            dispName = shortHash(rawAttr)  -- fallback to short hash
         end
     end
 
@@ -166,7 +191,7 @@ local function getCarData(model)
         hash      = hashStr,
         price     = price,
         owner     = owner,
-        chance    = model:GetAttribute("SpawnChance")      or 0,
+        chance    = chance,
         profit    = model:GetAttribute("ProfitMultiplier") or 0,
         isBuyable = (owner == ""),
         tier      = getTier(price),
@@ -359,8 +384,15 @@ local function removeEntry(model)
 end
 
 for _, v in ipairs(VehicleFolder:GetChildren()) do addEntry(v) end
-track(VehicleFolder.ChildAdded:Connect(addEntry))
-track(VehicleFolder.ChildRemoved:Connect(removeEntry))
+track(VehicleFolder.ChildAdded:Connect(function(m)
+    addEntry(m)
+    task.wait(0.5)  -- wait for attributes to replicate
+    if Options.CarTelePicker then buildVehicleDrop() end
+end))
+track(VehicleFolder.ChildRemoved:Connect(function(m)
+    removeEntry(m)
+    if Options.CarTelePicker then buildVehicleDrop() end
+end))
 
 -- ================================================================
 --  RESPAWN WAVE NOTIF  (count buyable cars added in a wave)
@@ -607,6 +639,75 @@ TeleGroup:AddButton({ Text='Teleport', DoubleClick=false,
             warn("[CarScript] Tele:", cf)
         end
     end
+})
+
+-- ── Teleport to specific car in junkyard ─────────────────────────
+-- vehicleDropMap[label] = model reference
+local vehicleDropMap = {}
+
+local function buildVehicleDrop()
+    vehicleDropMap = {}
+    local labels   = {}
+    local seen     = {}
+    for _, model in ipairs(VehicleFolder:GetChildren()) do
+        if not model:IsA("Model") then continue end
+        local d = getCarData(model)
+        -- Only list buyable (junkyard) cars
+        if not d.isBuyable then continue end
+        local lbl = d.name.." ("..d.tier.label..")"
+        -- Deduplicate labels
+        local base = lbl; local n = 1
+        while seen[lbl] do n+=1; lbl = base.." #"..n end
+        seen[lbl] = true
+        labels[#labels+1] = lbl
+        vehicleDropMap[lbl] = model
+    end
+    if #labels == 0 then labels = {"(no cars)"} end
+    if Options.CarTelePicker then
+        Options.CarTelePicker:SetValues(labels)
+    end
+    return labels
+end
+
+-- Pre-populate with placeholder (UI element created below)
+local carTeleLabels = { "(loading...)" }
+
+TeleGroup:AddDropdown('CarTelePicker', {
+    Values  = carTeleLabels,
+    Default = carTeleLabels[1],
+    Multi   = false,
+    Text    = 'Car (Tier)',
+    Tooltip = 'Junkyard cars — refresh to update list',
+    Callback = function(_) end,
+})
+TeleGroup:AddButton({ Text='Teleport to Car', DoubleClick=false,
+    Func=function()
+        local sel = Options.CarTelePicker and Options.CarTelePicker.Value
+        if not sel or sel == "(no cars)" or sel == "(loading...)" then
+            Library:Notify("No car selected"); return
+        end
+        local model = vehicleDropMap[sel]
+        if not model or not model.Parent then
+            Library:Notify("Car no longer exists, refresh list"); return
+        end
+        local root = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+        if not root then Library:Notify("No root part"); return end
+        local hrp = (LocalPlayer.Character or {}).HumanoidRootPart
+        if hrp then
+            hrp.CFrame = root.CFrame + Vector3.new(0, 6, 0)
+            Library:Notify("→ "..sel)
+        else
+            Library:Notify("No character")
+        end
+    end,
+    Tooltip = 'Teleport to the selected junkyard car'
+})
+TeleGroup:AddButton({ Text='Refresh Car List', DoubleClick=false,
+    Func=function()
+        local labels = buildVehicleDrop()
+        Library:Notify(#labels.." car(s) found")
+    end,
+    Tooltip = 'Rescan junkyard for current cars'
 })
 
 -- ================================================================
@@ -952,6 +1053,7 @@ end))
 task.spawn(function()
     task.wait(1)
     refreshGarage()
+    buildVehicleDrop()
 
     -- Load shop parts
     local ok, spareParts = pcall(function()
