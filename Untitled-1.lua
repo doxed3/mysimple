@@ -31,6 +31,7 @@ local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 local CoreGui            = game:GetService("CoreGui")
 local MarketplaceService = game:GetService("MarketplaceService")
 local TweenService       = game:GetService("TweenService")
+local UIS                = game:GetService("UserInputService")
 
 local Camera        = workspace.CurrentCamera
 local LocalPlayer   = Players.LocalPlayer
@@ -111,6 +112,14 @@ local State = {
     farmEnabled  = false,
     farmMode     = "fix",
     farmTick     = 3.0,
+    -- Misc
+    flyActive         = false,
+    flySpeed          = 4,
+    flyIgnore         = false,
+    walkSpeed         = 25,
+    jumpPower         = 50,
+    overrideWalkSpeed = false,
+    overrideJumpPower = false,
     -- UI
     watermark    = false,
 }
@@ -383,6 +392,9 @@ local function removeEntry(model)
     _entries[model] = nil
 end
 
+-- Forward declaration — defined later in Teleporting UI section
+local buildVehicleDrop = function() end
+
 for _, v in ipairs(VehicleFolder:GetChildren()) do addEntry(v) end
 track(VehicleFolder.ChildAdded:Connect(function(m)
     addEntry(m)
@@ -567,6 +579,7 @@ local Tabs = {
     Main     = Window:AddTab('MAIN'),
     Junkyard = Window:AddTab('JUNKYARD'),
     Farm     = Window:AddTab('FARM'),
+    Misc     = Window:AddTab('MISC'),
     UI       = Window:AddTab('UI Settings'),
 }
 
@@ -579,6 +592,8 @@ local LabelGroup  = Tabs.Junkyard:AddLeftGroupbox('ESP Labels')
 local TierGroup   = Tabs.Junkyard:AddRightGroupbox('Tiers')
 local FarmMain    = Tabs.Farm:AddLeftGroupbox('AutoFarm')
 local FarmInfo    = Tabs.Farm:AddRightGroupbox('Info')
+local MoveGroup   = Tabs.Misc:AddLeftGroupbox('Movement')
+local FlyGroup    = Tabs.Misc:AddRightGroupbox('CFrame Fly')
 local MenuGroup   = Tabs.UI:AddLeftGroupbox('Menu')
 
 -- ================================================================
@@ -642,10 +657,9 @@ TeleGroup:AddButton({ Text='Teleport', DoubleClick=false,
 })
 
 -- ── Teleport to specific car in junkyard ─────────────────────────
--- vehicleDropMap[label] = model reference
 local vehicleDropMap = {}
 
-local function buildVehicleDrop()
+buildVehicleDrop = function()
     vehicleDropMap = {}
     local labels   = {}
     local seen     = {}
@@ -873,6 +887,151 @@ FarmInfo:AddLabel(' ')
 FarmInfo:AddLabel('Tick = delay between actions')
 
 -- ================================================================
+--  MISC TAB – Movement
+-- ================================================================
+local function getHumanoid()
+    -- Try game-specific path first, fallback to standard character path
+    local hum
+    pcall(function() hum = workspace.Characters[LocalPlayer.Name].Humanoid end)
+    if not hum then
+        pcall(function() hum = LocalPlayer.Character.Humanoid end)
+    end
+    return hum
+end
+
+local function applyMovement()
+    local hum = getHumanoid()
+    if not hum then return end
+    if State.overrideWalkSpeed then hum.WalkSpeed = State.walkSpeed end
+    if State.overrideJumpPower  then hum.JumpPower  = State.jumpPower  end
+end
+
+-- WalkSpeed toggle + keybind
+MoveGroup:AddToggle('OverrideWalkSpeed', {
+    Text    = 'WalkSpeed Override',
+    Default = false,
+    Tooltip = 'Continuously reapply WalkSpeed (bypasses anti-cheat reset)',
+    Callback = function(v) State.overrideWalkSpeed = v end,
+}):AddKeyPicker('WalkSpeedKey', {
+    Default         = 'F5',
+    SyncToggleState = true,
+    Mode            = 'Toggle',
+    Text            = 'WalkSpeed Key',
+    NoUI            = false,
+})
+MoveGroup:AddSlider('WalkSpeed', {
+    Text     = 'Walk Speed',
+    Default  = 25,
+    Min      = 1,
+    Max      = 300,
+    Rounding = 0,
+    Tooltip  = 'Default: 25  |  Applied every frame when override is ON',
+    Callback = function(v) State.walkSpeed = v end,
+})
+
+MoveGroup:AddDivider()
+
+-- JumpPower toggle + keybind
+MoveGroup:AddToggle('OverrideJumpPower', {
+    Text    = 'JumpPower Override',
+    Default = false,
+    Tooltip = 'Continuously reapply JumpPower (bypasses anti-cheat reset)',
+    Callback = function(v) State.overrideJumpPower = v end,
+}):AddKeyPicker('JumpPowerKey', {
+    Default         = 'F6',
+    SyncToggleState = true,
+    Mode            = 'Toggle',
+    Text            = 'JumpPower Key',
+    NoUI            = false,
+})
+MoveGroup:AddSlider('JumpPower', {
+    Text     = 'Jump Power',
+    Default  = 50,
+    Min      = 0,
+    Max      = 280,
+    Rounding = 0,
+    Tooltip  = 'Default: 50  |  Applied every frame when override is ON',
+    Callback = function(v) State.jumpPower = v end,
+})
+
+MoveGroup:AddDivider()
+
+MoveGroup:AddButton({ Text='Reset Defaults', DoubleClick=false,
+    Func=function()
+        -- Turn off overrides
+        State.overrideWalkSpeed = false
+        State.overrideJumpPower  = false
+        if Options.OverrideWalkSpeed then Options.OverrideWalkSpeed:SetValue(false) end
+        if Options.OverrideJumpPower  then Options.OverrideJumpPower:SetValue(false)  end
+        -- Reset values
+        State.walkSpeed = 25
+        State.jumpPower = 50
+        if Options.WalkSpeed then Options.WalkSpeed:SetValue(25) end
+        if Options.JumpPower  then Options.JumpPower:SetValue(50)  end
+        -- Apply directly to humanoid
+        local hum = getHumanoid()
+        if hum then
+            hum.WalkSpeed = 25
+            hum.JumpPower = 50
+        end
+        Library:Notify('Movement reset — overrides OFF')
+    end,
+})
+
+-- Reapply on character respawn
+track(LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5); applyMovement()
+end))
+
+-- ================================================================
+--  MISC TAB – CFrame Fly
+-- ================================================================
+-- flyPoint tracks where the character should be in world space
+local flyPoint = CFrame.new(0, 0, 0)
+
+FlyGroup:AddLabel('WASD = move  Q/E = up/down')
+FlyGroup:AddLabel('Space = pause movement')
+
+FlyGroup:AddToggle('FlyEnabled', {
+    Text    = 'CFrame Fly',
+    Default = false,
+    Tooltip = 'Toggle fly mode — use keybind to toggle without opening menu',
+    Callback = function(v)
+        State.flyActive = v
+        if v then
+            -- Capture current character position as start point
+            local char = LocalPlayer.Character
+            if char then flyPoint = char:GetPivot() end
+            Library:Notify('Fly ON  |  WASD+QE to move')
+        else
+            -- Land: let physics resume naturally
+            local char = LocalPlayer.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then hrp.Velocity = Vector3.zero end
+            end
+            Library:Notify('Fly OFF')
+        end
+    end,
+}):AddKeyPicker('FlyKeybind', {
+    Default         = 'RightBracket',  -- ] key (easy to reach, doesn't conflict)
+    SyncToggleState = true,
+    Mode            = 'Toggle',
+    Text            = 'Fly Toggle Key',
+    NoUI            = false,
+})
+
+FlyGroup:AddSlider('FlySpeed', {
+    Text     = 'Fly Speed',
+    Default  = 4,
+    Min      = 1,
+    Max      = 50,
+    Rounding = 0,
+    Tooltip  = 'Units moved per step (higher = faster)',
+    Callback = function(v) State.flySpeed = v end,
+})
+
+-- ================================================================
 --  UI SETTINGS TAB
 -- ================================================================
 MenuGroup:AddButton('Unload', function() Library:Unload() end)
@@ -1044,6 +1203,72 @@ track(RunService.Heartbeat:Connect(function()
             pcall(function() carCondLbl:SetText("Cond:  —") end)
             pcall(function() carPriceLbl:SetText("Price: —") end)
         end
+    end
+end))
+
+-- ── MOVEMENT OVERRIDE (anti-cheat bypass) ────────────────────────
+local moveTimer = 0
+track(RunService.Heartbeat:Connect(function(dt)
+    if not _alive then return end
+    if not State.overrideWalkSpeed and not State.overrideJumpPower then return end
+    moveTimer += dt
+    if moveTimer < 0.1 then return end
+    moveTimer = 0
+    -- Try workspace.Characters path first, fallback to character
+    local hum
+    pcall(function() hum = workspace.Characters[LocalPlayer.Name].Humanoid end)
+    if not hum then
+        pcall(function() hum = LocalPlayer.Character.Humanoid end)
+    end
+    if not hum then return end
+    if State.overrideWalkSpeed then hum.WalkSpeed = State.walkSpeed end
+    if State.overrideJumpPower  then hum.JumpPower  = State.jumpPower  end
+end))
+
+-- ── CFrame FLY ───────────────────────────────────────────────────
+-- Stepped: lock character at flyPoint every frame, zero velocity
+track(RunService.Stepped:Connect(function()
+    if not _alive or not State.flyActive then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then hrp.Velocity = Vector3.zero end
+    -- Orient flyPoint toward camera look direction
+    local camCF = Camera.CFrame
+    flyPoint = CFrame.new(flyPoint.Position, flyPoint.Position + camCF.LookVector)
+    char:PivotTo(flyPoint)
+end))
+
+-- InputBegan: WASD + Q/E move flyPoint, Space pauses
+track(UIS.InputBegan:Connect(function(input, gpe)
+    if gpe or not _alive or not State.flyActive then return end
+    local key = input.KeyCode
+
+    local moveMap = {
+        [Enum.KeyCode.W]     = Vector3.new(0, 0, -1),
+        [Enum.KeyCode.S]     = Vector3.new(0, 0,  1),
+        [Enum.KeyCode.A]     = Vector3.new(-1, 0, 0),
+        [Enum.KeyCode.D]     = Vector3.new(1,  0, 0),
+        [Enum.KeyCode.Q]     = Vector3.new(0,  1, 0),
+        [Enum.KeyCode.E]     = Vector3.new(0, -1, 0),
+    }
+    local dir = moveMap[key]
+    if dir then
+        task.spawn(function()
+            while UIS:IsKeyDown(key) and State.flyActive and _alive do
+                RunService.Stepped:Wait()
+                if State.flyIgnore then continue end
+                flyPoint = flyPoint * CFrame.new(dir * State.flySpeed)
+            end
+        end)
+    elseif key == Enum.KeyCode.Space then
+        State.flyIgnore = true
+    end
+end))
+
+track(UIS.InputEnded:Connect(function(input, _)
+    if input.KeyCode == Enum.KeyCode.Space then
+        State.flyIgnore = false
     end
 end))
 
