@@ -9,7 +9,7 @@ local GITHUB_RAW = "https://raw.githubusercontent.com/doxed3/mysimple/main/"
 -- Add more games here as you build scripts for them
 local SCRIPTS = {
     -- [PlaceId] = "filename.lua"
-    [2534724415] = "CarESP.lua",          -- Fix It Up
+    [72712036210947] = "CarESP.lua",          -- Fix It Up
     [111862336710239] = "Backstreet Survival [Beta].lua", -- Backstreet Survival [Beta]
     -- [12345678]  = "AnotherGame.lua",   -- another game
 }
