@@ -128,13 +128,18 @@ local State = {
 --  CONFIG
 -- ================================================================
 local CFG = {
-    TIERS = {
-        { min = 0,       max = 49999,     label = "D", color = Color3.fromRGB(160, 255, 160) },  -- light green
-        { min = 50000,   max = 149999,    label = "C", color = Color3.fromRGB(0,   200, 80)  },  -- dark green
-        { min = 150000,  max = 499999,    label = "B", color = Color3.fromRGB(80,  130, 235) },  -- blue
-        { min = 500000,  max = 1499999,   label = "A", color = Color3.fromRGB(210, 80,  235) },  -- purple
-        { min = 1500000, max = math.huge, label = "S", color = Color3.fromRGB(255, 215, 0)   },  -- gold
-    },
+    -- Tiers by SpawnChance (0-100 scale, higher = more common = lower tier)
+    -- S = exclusive / ultra-rare  (chance = 0 OR < 0.05)
+    -- A = very rare               (0.05 ≤ chance < 1)
+    -- B = uncommon                (1    ≤ chance < 5)
+    -- C = common                  (5    ≤ chance < 20)
+    -- D = very common             (chance ≥ 20)
+    TIER_S = { label="S", color=Color3.fromRGB(255, 215, 0)   },  -- gold
+    TIER_A = { label="A", color=Color3.fromRGB(210, 80,  235) },  -- purple
+    TIER_B = { label="B", color=Color3.fromRGB(80,  130, 235) },  -- blue
+    TIER_C = { label="C", color=Color3.fromRGB(0,   200, 80)  },  -- dark green
+    TIER_D = { label="D", color=Color3.fromRGB(160, 255, 160) },  -- light green
+
     BUYABLE_COLOR = Color3.fromRGB(0,   230, 80),
     OWNED_COLOR   = Color3.fromRGB(255, 60,  60),
     FONT          = Enum.Font.GothamBold,
@@ -146,19 +151,30 @@ local TIER_SHOW = { S="showS", A="showA", B="showB", C="showC", D="showD" }
 -- ================================================================
 --  HELPERS
 -- ================================================================
-local function getTier(price)
-    for _, t in ipairs(CFG.TIERS) do
-        if price >= t.min and price <= t.max then return t end
-    end
-    return CFG.TIERS[1]
+local function getTierByChance(chance)
+    -- chance is on a 0–100 scale (e.g. 50 = 50%, 0.3 = 0.3%)
+    -- SpawnChance=0 means exclusive / not in junkyard rotation → S tier
+    if chance == 0   then return CFG.TIER_S end
+    if chance < 0.05 then return CFG.TIER_S end
+    if chance < 1    then return CFG.TIER_A end
+    if chance < 5    then return CFG.TIER_B end
+    if chance < 20   then return CFG.TIER_C end
+    return CFG.TIER_D
+end
+
+-- Parse "min max" price string → returns min, max separately
+local function parsePriceRange(attr)
+    if not attr then return 0, 0 end
+    local s = tostring(attr)
+    local a, b = s:match("(%d+)%s+(%d+)")
+    if a then return tonumber(a), tonumber(b) end
+    local n = tonumber(s) or 0
+    return n, n
 end
 
 local function parsePrice(attr)
-    if not attr then return 0 end
-    local s = tostring(attr)
-    local a, b = s:match("(%d+)%s+(%d+)")
-    if a then return math.floor((tonumber(a)+tonumber(b))/2) end
-    return math.floor(tonumber(s) or 0)
+    local a, b = parsePriceRange(attr)
+    return math.floor((a + b) / 2)
 end
 
 local function isUUID(s)
@@ -172,7 +188,7 @@ end
 local function getCarData(model)
     local owner      = model:GetAttribute("Owner") or ""
     local priceAttr  = model:GetAttribute("Price")
-    local price      = parsePrice(priceAttr)
+    local minPrice, maxPrice = parsePriceRange(priceAttr)
     local rawAttr    = model:GetAttribute("Model") or model.Name
     local hash       = model.Name
     local hashStr    = isUUID(hash) and shortHash(hash) or hash
@@ -181,29 +197,25 @@ local function getCarData(model)
     -- Resolve display name
     local dispName
     if not isUUID(rawAttr) then
-        -- Owned car: attr Model IS the real name → apply CarNames brand alias
         dispName = CarNames and CarNames:GetName(rawAttr) or rawAttr
     else
-        -- Junkyard car: attr Model is a UUID → match via SpawnChance + Price in CarList
-        local key    = tostring(chance).."_"..tostring(priceAttr or "")
+        -- Junkyard UUID car: match by SpawnChance + Price key via carListLookup function
         local looked = carListLookup(chance, priceAttr)
-        if looked then
-            dispName = looked
-        else
-            dispName = shortHash(rawAttr)  -- fallback to short hash
-        end
+        dispName = looked or shortHash(rawAttr)
     end
 
     return {
         name      = dispName,
         fullName  = rawAttr,
         hash      = hashStr,
-        price     = price,
+        minPrice  = minPrice,
+        maxPrice  = maxPrice,
+        price     = math.floor((minPrice + maxPrice) / 2),  -- midpoint for tier only
         owner     = owner,
         chance    = chance,
         profit    = model:GetAttribute("ProfitMultiplier") or 0,
         isBuyable = (owner == ""),
-        tier      = getTier(price),
+        tier      = getTierByChance(chance),
     }
 end
 
@@ -293,8 +305,8 @@ local function createEntry(model)
     label.Parent      = bb
 
     local hl = Instance.new("Highlight")
-    hl.FillColor           = CFG.TIERS[1].color
-    hl.OutlineColor        = CFG.TIERS[1].color
+    hl.FillColor           = Color3.fromRGB(160, 255, 160)  -- default D tier color
+    hl.OutlineColor        = Color3.fromRGB(160, 255, 160)
     hl.FillTransparency    = 0.5
     hl.OutlineTransparency = 0
     hl.Adornee             = model
@@ -331,10 +343,13 @@ local function buildRich(data, dist)
     if State.showChances then
         tp[#tp+1] = tostring(data.chance).."%"
     end
-    if State.showPrice then tp[#tp+1] = "$"..fmtNum(data.price) end
+    if State.showPrice then
+        local priceStr = data.minPrice == data.maxPrice
+            and ("$"..fmtNum(data.minPrice))
+            or  ("$"..fmtNum(data.minPrice).."–"..fmtNum(data.maxPrice))
+        tp[#tp+1] = priceStr
+    end
     if #tp > 0 then lines[#lines+1] = table.concat(tp, " | ") end
-
-    -- Line 4: profit + dist
     local ep = {}
     if State.showProfit then ep[#ep+1] = "x"..tostring(data.profit) end
     if State.showDist   then ep[#ep+1] = math.floor(dist).." studs" end
@@ -351,9 +366,13 @@ local function buildPlain(data, dist)
     local tp = {}
     if State.showTier  then tp[#tp+1] = "Tier:"..data.tier.label end
     if State.showChances then tp[#tp+1] = tostring(data.chance).."%" end
-    if State.showPrice then tp[#tp+1] = "$"..fmtNum(data.price) end
+    if State.showPrice then
+        local priceStr = data.minPrice == data.maxPrice
+            and ("$"..fmtNum(data.minPrice))
+            or  ("$"..fmtNum(data.minPrice).."–"..fmtNum(data.maxPrice))
+        tp[#tp+1] = priceStr
+    end
     if #tp > 0 then lines[#lines+1] = table.concat(tp, " | ") end
-    local ep = {}
     if State.showProfit then ep[#ep+1] = "x"..tostring(data.profit) end
     if State.showDist   then ep[#ep+1] = math.floor(dist).." studs" end
     if #ep > 0 then lines[#lines+1] = table.concat(ep, " | ") end
