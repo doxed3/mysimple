@@ -373,6 +373,7 @@ local function buildPlain(data, dist)
         tp[#tp+1] = priceStr
     end
     if #tp > 0 then lines[#lines+1] = table.concat(tp, " | ") end
+    local ep = {}
     if State.showProfit then ep[#ep+1] = "x"..tostring(data.profit) end
     if State.showDist   then ep[#ep+1] = math.floor(dist).." studs" end
     if #ep > 0 then lines[#lines+1] = table.concat(ep, " | ") end
