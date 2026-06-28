@@ -3,7 +3,7 @@
 --  One loadstring → checks game → runs correct script from GitHub
 -- ================================================================
 
-local GITHUB_RAW = "https://raw.githubusercontent.com/doxed3/YOURREPO/main/"
+local GITHUB_RAW = "https://raw.githubusercontent.com/doxed3/mysimple/main/"
 
 -- ── GAME MAP ────────────────────────────────────────────────────
 -- Add more games here as you build scripts for them
