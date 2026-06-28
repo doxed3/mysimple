@@ -3,15 +3,13 @@
 --  One loadstring → checks game → runs correct script from GitHub
 -- ================================================================
 
-local GITHUB_RAW = "https://raw.githubusercontent.com/doxed3/mysimple/main/"
+local GITHUB_RAW = "https://raw.githubusercontent.com/doxed3/YOURREPO/main/"
 
 -- ── GAME MAP ────────────────────────────────────────────────────
 -- Add more games here as you build scripts for them
 local SCRIPTS = {
-    -- [PlaceId] = "filename.lua"
-    [72712036210947] = "CarESP.lua",          -- Fix It Up
-    [111862336710239] = "Backstreet Survival [Beta].lua", -- Backstreet Survival [Beta]
-    -- [12345678]  = "AnotherGame.lua",   -- another game
+    [72712036210947]   = "CarESP.lua",                          -- Fix It Up
+    [111862336710239]  = "Backstreet%20Survival%20%5BBeta%5D.lua", -- Backstreet Survival [Beta]
 }
 
 -- ── GAME CHECK ──────────────────────────────────────────────────
@@ -42,6 +40,7 @@ end
 print(string.format("[Loader] Game: %s | Loading: %s", gameName, scriptFile))
 
 local url = GITHUB_RAW .. scriptFile
+print("[Loader] URL: " .. url)
 
 local ok, err = pcall(function()
     loadstring(game:HttpGet(url))()
